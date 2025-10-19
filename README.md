@@ -1,4 +1,5 @@
-![alt text](https://github.com/antoineszatkownik/zygotron_scene_builder/tree/main/misc/webpabe_illu.png)
+![alt text](https://github.com/antoineszatkownik/zygotron_scene_builder/blob/main/misc/webpabe_illu.png?raw=true)
+
 
 ## TODO
 
