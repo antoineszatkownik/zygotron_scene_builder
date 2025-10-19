@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Zygotron Scene Builder</title>
+<style>
+:root{--bg:#0b0c10;--panel:#121417;--muted:#22262b;--accent:#5fe3b8;--text:#e8f0f2;--left:160px;--right:160px}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;font-family:sans-serif;background:var(--bg);color:var(--text)}
+/* App grid with resizable gutters */
+.app{
+  display:grid; /* <-- ensure a grid layout */
+  grid-template-columns: var(--left) 6px 1fr 6px var(--right); /* two side panels around center */
+  grid-template-rows: 1fr;   /* single full-height row */
+  height: 100vh;
+  gap: 10px;
+  padding: 0;                 /* no extra vertical padding */
+}
+.panel{background:var(--panel);border:1px solid var(--muted);border-radius:14px;display:flex;flex-direction:column;min-height:0}
+.panel h2{margin:10px;font-size:14px}
+.gallery{padding:10px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;overflow:auto}
+.thumb{background:#0e1115;border:1px dashed #2b3138;border-radius:10px;display:flex;align-items:center;justify-content:center;aspect-ratio:1/1;overflow:hidden;cursor:grab}
+.thumb img{max-width:100%;max-height:100%;opacity:.95;pointer-events:none}
+/* Center stage */
+.stage-wrap{position:relative;background:var(--panel);border:1px solid var(--muted);border-radius:14px;padding:0;display:flex;align-items:stretch;justify-content:center;min-height:0;height: 100%}
+.stage-inner{position:relative;flex:1;display:flex;align-items:center;justify-content:center;min-height:0;height:100%}
+.stage-tools{position:absolute;top:18px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:5}
+.tool{border:1px solid var(--muted);background:#11151a;padding:6px 10px;border-radius:10px;font-size:12px;cursor:pointer;color: white;}
+.tool.active{outline:2px solid var(--accent)}
+canvas#stage{background:#fff;border-radius:0px;box-shadow:0 0 0 1px #dfe4ea inset;max-width:100%;max-height:100%}
+/* Gutters */
+.gutter{background:transparent;cursor:col-resize;border-radius:6px}
+.gutter:hover{background:#1b2026}
+label.tool{display:inline-block;margin:8px 10px 0}
+input[type=file]{margin:8px 10px}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Left: Zygotrons -->
+  <section class="panel" style="grid-column:1">
+    <h2>Zygotrons</h2>
+    <label class="tool" for="zyg-input">Load PNGs</label>
+    <input id="zyg-input" type="file" accept="image/png,image/webp,image/jpeg" multiple>
+    <div class="gallery" id="zyg-gallery"></div>
+  </section>
+
+  <!-- Gutter between left and center -->
+  <div class="gutter" id="gutter-left" style="grid-column:2"></div>
+
+  <!-- Center: Stage -->
+  <section class="stage-wrap" style="grid-column:3">
+    <div class="stage-tools">
+      <button class="tool" id="tool-select">Select/Move</button>
+      <button class="tool" id="tool-text">Text Mode</button>
+      <button class="tool" id="tool-textarea">Text Area</button>
+      <button class="tool" id="toggle-ta-outline" title="Show/Hide text area outline (H)">Toggle Outline</button>
+      <button class="tool" id="btn-rotate" title="Rotate 90° (Shift+R)">Rotate 90°</button>
+      <button class="tool" id="btn-forward">Bring Forward</button>
+      <button class="tool" id="btn-backward">Send Backward</button>
+      <button class="tool" id="btn-save">Save JPG</button>
+    </div>
+    <div class="stage-inner">
+      <canvas id="stage"></canvas>
+    </div>
+  </section>
+
+  <!-- Gutter between center and right -->
+  <div class="gutter" id="gutter-right" style="grid-column:4"></div>
+
+  <!-- Right: Alphabet -->
+  <section class="panel" style="grid-column:5">
+    <h2>Alphabet Symbols</h2>
+    <label class="tool" for="alpha-input">Load PNGs</label>
+    <input id="alpha-input" type="file" accept="image/png,image/webp,image/jpeg" multiple>
+    <div class="gallery" id="alpha-gallery"></div>
+    <div style="font-size:12px;opacity:.8;padding:6px 10px 12px">Tip: click a symbol to map it to a letter (A–Z), then use Text or Text Area.</div>
+  </section>
+
+  <div style="grid-column:1/6;height:1px"></div>
+</div>
+
+<script>
+// === Zygotron Scene Builder — galleries accumulate + resizable columns + TA selection/resize + ROTATION ===
+const stage = document.getElementById('stage');
+const ctx = stage.getContext('2d');
+const stageInner = document.querySelector('.stage-inner');
+const zygGallery = document.getElementById('zyg-gallery');
+const alphaGallery = document.getElementById('alpha-gallery');
+const zygInput = document.getElementById('zyg-input');
+const alphaInput = document.getElementById('alpha-input');
+const toolSelectBtn = document.getElementById('tool-select');
+const toolTextBtn = document.getElementById('tool-text');
+const toolTextAreaBtn = document.getElementById('tool-textarea');
+const toggleTaBtn = document.getElementById('toggle-ta-outline');
+const rotateBtn = document.getElementById('btn-rotate');
+
+// Dynamic canvas size (crisp on HiDPI)
+function resizeCanvasToFit(){
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const rect = stageInner.getBoundingClientRect();
+  stage.width = Math.max(200, Math.floor(rect.width * dpr));
+  stage.height = Math.max(200, Math.floor(rect.height * dpr));
+  stage.style.width = rect.width + 'px';
+  stage.style.height = rect.height + 'px';
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.scale(dpr, dpr);
+  draw();
+}
+window.addEventListener('resize', resizeCanvasToFit);
+
+// ----- State
+const zygKeys = new Set();
+const alphaKeys = new Set();
+
+let items = []; // {img, x, y, w, h, angle?}
+let selected = null;           // index for single image selection
+let dragging = false;
+let resizing = false;
+let resizeCorner = null; // 'nw','ne','se','sw'
+let dragOffset = {x:0,y:0, sx:0, sy:0, itx:0, ity:0, w:0, h:0};
+const HANDLE = 16;
+
+// Tool state
+let currentTool = 'select';
+function setTool(t){
+  currentTool = t;
+  toolSelectBtn.classList.toggle('active', t==='select');
+  toolTextBtn.classList.toggle('active', t==='text');
+  toolTextAreaBtn.classList.toggle('active', t==='textarea');
+  if(t==='text') stage.style.cursor = 'text';
+  else if(t==='textarea') stage.style.cursor = 'crosshair';
+  else stage.style.cursor = 'default';
+}
+setTool('select');
+// clickable buttons
+toolSelectBtn.addEventListener('click', ()=> setTool('select'));
+toolTextBtn.addEventListener('click', ()=> setTool('text'));
+toolTextAreaBtn.addEventListener('click', ()=> setTool('textarea'));
+toggleTaBtn.addEventListener('click', ()=>{ textArea.show = !textArea.show; draw(); });
+rotateBtn.addEventListener('click', ()=> rotateSelected90());
+
+document.getElementById('btn-forward').onclick = ()=>{
+  if (taSelected && textArea.active) moveTextAreaGroup(+1);
+  else if (selected!=null && selected<items.length-1) {
+    const it = items.splice(selected,1)[0];
+    items.splice(selected+1,0,it);
+    selected++;
+    draw();
+  }
+};
+
+document.getElementById('btn-backward').onclick = ()=>{
+  if (taSelected && textArea.active) moveTextAreaGroup(-1);
+  else if (selected!=null && selected>0) {
+    const it = items.splice(selected,1)[0];
+    items.splice(selected-1,0,it);
+    selected--;
+    draw();
+  }
+};
+
+
+document.getElementById('btn-save').onclick = ()=>{
+  const dataURL = stage.toDataURL('image/jpeg', 1.0);
+  const a = document.createElement('a');
+  a.href = dataURL;
+  a.download = 'zygotron_scene.jpg';
+  a.click();
+};
+
+
+
+// Text caret tool state
+let caretActive = false;
+let caretX = 120, caretY = 120, caretStartX = 120;
+let caretBlink = true; setInterval(()=>{ caretBlink = !caretBlink; if(currentTool==='text' && caretActive) draw(); }, 500);
+const symbolMap = {}; // letter (lowercase) -> HTMLImageElement
+const SYMBOL_SIZE = 48, LETTER_SPACING = 8, LINE_HEIGHT = 56;
+
+// Text area state (hideable + selectable + group draggable/resizable)
+let taCreating = false, taDragging = false, taResizing = false;
+let taDragOffset = {x:0,y:0}, taResizeCorner = null;
+let taSelected = false;
+const textArea = {active:false, show:true, x:0, y:0, w:0, h:0, cursorX:0, cursorY:0, buffer:[]};
+
+// ----- Helpers
+function getStageCoords(e){
+  const r = stage.getBoundingClientRect();
+  const sx = (e.clientX - r.left) * (stage.width / r.width);
+  const sy = (e.clientY - r.top) * (stage.height / r.height);
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  return {sx: sx / dpr, sy: sy / dpr};
+}
+
+function draw(){
+  ctx.clearRect(0,0,stage.width,stage.height);
+  ctx.fillStyle = '#fff';
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  ctx.fillRect(0,0,stage.width/dpr,stage.height/dpr);
+
+  // items (with rotation)
+  items.forEach((it, i)=>{
+    const angle = (it.angle || 0) % 360;
+    const cx = it.x + it.w/2;
+    const cy = it.y + it.h/2;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle * Math.PI/180);
+    ctx.drawImage(it.img, -it.w/2, -it.h/2, it.w, it.h);
+    ctx.restore();
+
+    // selection bbox is axis-aligned w×h (kept in sync when rotating)
+    if(i===selected){
+      ctx.strokeStyle = '#00bcd4';
+      ctx.lineWidth = 1; ctx.strokeRect(it.x, it.y, it.w, it.h);
+      const hs = HANDLE; ctx.fillStyle = '#00bcd4';
+      ctx.fillRect(it.x - hs/2, it.y - hs/2, hs, hs);
+      ctx.fillRect(it.x + it.w - hs/2, it.y - hs/2, hs, hs);
+      ctx.fillRect(it.x + it.w - hs/2, it.y + it.h - hs/2, hs, hs);
+      ctx.fillRect(it.x - hs/2, it.y + it.h - hs/2, hs, hs);
+    }
+  });
+
+  // caret for text tool
+  if(currentTool==='text' && caretActive && caretBlink){
+    ctx.save();
+    ctx.strokeStyle = '#222';
+    ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(caretX, caretY - 14); ctx.lineTo(caretX, caretY + 14); ctx.stroke();
+    ctx.restore();
+  }
+
+  // text area rectangle (visible if show==true or when selected)
+  if(textArea.active && (textArea.show || taSelected)){
+    ctx.save();
+    ctx.strokeStyle = taSelected ? '#00bcd4' : '#333';
+    ctx.setLineDash(taSelected ? [] : [6,4]);
+    ctx.strokeRect(textArea.x, textArea.y, textArea.w, textArea.h);
+    if(taSelected){
+      const hs = HANDLE; ctx.fillStyle = '#00bcd4';
+      ctx.fillRect(textArea.x - hs/2, textArea.y - hs/2, hs, hs);
+      ctx.fillRect(textArea.x + textArea.w - hs/2, textArea.y - hs/2, hs, hs);
+      ctx.fillRect(textArea.x + textArea.w - hs/2, textArea.y + textArea.h - hs/2, hs, hs);
+      ctx.fillRect(textArea.x - hs/2, textArea.y + textArea.h - hs/2, hs, hs);
+    }
+    ctx.restore();
+  }
+
+  // caret for text-area mode
+  if (currentTool==='textarea' && textArea.active && caretBlink) {
+    ctx.save();
+    ctx.strokeStyle = '#222';
+    ctx.setLineDash([4,4]);
+    ctx.beginPath();
+    ctx.moveTo(textArea.cursorX, textArea.cursorY - (LINE_HEIGHT * 0.7));
+    ctx.lineTo(textArea.cursorX, textArea.cursorY - (LINE_HEIGHT * 0.1));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+}
+
+function hitTest(it, sx, sy){
+  const inside = (sx>=it.x && sx<=it.x+it.w && sy>=it.y && sy<=it.y+it.h);
+  if(!inside) return null;
+  const hs = HANDLE, pad = 6;
+  const corners = [
+    {x:it.x, y:it.y, k:'nw', cursor:'nwse-resize'},
+    {x:it.x+it.w, y:it.y, k:'ne', cursor:'nesw-resize'},
+    {x:it.x+it.w, y:it.y+it.h, k:'se', cursor:'nwse-resize'},
+    {x:it.x, y:it.y+it.h, k:'sw', cursor:'nesw-resize'},
+  ];
+  for(const c of corners){
+    if(Math.abs(sx-c.x)<=hs/2+pad && Math.abs(sy-c.y)<=hs/2+pad){
+      return {zone:'handle', corner:c.k, cursor:c.cursor};
+    }
+  }
+  return {zone:'body', cursor:'move'};
+}
+
+// ----- Galleries (accumulate uploads + map)
+function loadFiles(files, gallery){
+  const isAlpha = (gallery===alphaGallery);
+  const seen = isAlpha ? alphaKeys : zygKeys;
+  [...files].forEach(file => {
+    const key = (file.name||'') + ':' + (file.size||'0');
+    if(seen.has(key)) return;
+    seen.add(key);
+    const url = URL.createObjectURL(file);
+    const img = new Image(); img.src = url;
+    const cell = document.createElement('div');
+    cell.className = 'thumb';
+    const im = document.createElement('img'); im.src = url; im.alt = file.name || 'img';
+    cell.appendChild(im);
+    cell.draggable = true;
+    cell.addEventListener('dragstart', (ev)=>{
+      ev.dataTransfer.setData('text/plain', JSON.stringify({src:url,w:img.width,h:img.height}));
+    });
+    gallery.appendChild(cell);
+
+    if(isAlpha){
+      // add letter tag overlay
+      const tag = document.createElement('span');
+      tag.style.position = 'absolute';
+      tag.style.bottom = '4px';
+      tag.style.right = '6px';
+      tag.style.fontSize = '12px';
+      tag.style.color = '#ff0000';
+      tag.textContent = '';
+      cell.style.position = 'relative';
+      cell.appendChild(tag);
+
+      cell.addEventListener('click', ()=>{
+        const letter = prompt('Map letter (A–Z) to this symbol?');
+        if(!letter) return;
+        const k = String(letter).trim().toLowerCase();
+        if(k.length!==1 || k<'a' || k>'z') return;
+        const m = new Image(); m.src = url;
+        m.onload = ()=>{
+          symbolMap[k] = m;
+          tag.textContent = k.toUpperCase(); // visible label
+        };
+      });
+    }
+  });
+}
+zygInput.addEventListener('change', (e)=> loadFiles(e.target.files, zygGallery));
+alphaInput.addEventListener('change', (e)=> loadFiles(e.target.files, alphaGallery));
+
+// ----- Drag & drop from galleries
+stage.addEventListener('dragover', e=> e.preventDefault());
+stage.addEventListener('drop', e=>{
+  e.preventDefault();
+  let data; try{ data = JSON.parse(e.dataTransfer.getData('text/plain')); }catch{ return; }
+  const img = new Image(); img.src = data.src;
+  img.onload = ()=>{
+    const maxDim = 220;
+    let w = img.width||data.w||maxDim, h = img.height||data.h||maxDim;
+    const k = Math.min(1, maxDim/Math.max(w,h)); w*=k; h*=k;
+    const {sx, sy} = getStageCoords(e);
+    const x = sx - w/2, y = sy - h/2;
+    items.push({img, x, y, w, h, angle:0});
+    selected = items.length-1; caretActive=false; draw();
+  };
+});
+
+// ----- Mouse interactions
+stage.addEventListener('mousedown', (e)=>{
+  const {sx, sy} = getStageCoords(e);
+
+  if(currentTool==='text'){
+    caretActive = true; caretX = sx; caretY = sy; caretStartX = sx; selected=null; taSelected=false; draw(); return;
+  }
+  if(currentTool==='textarea'){
+    taCreating = true; textArea.active=false; textArea.buffer=[]; textArea.show = true;
+    textArea.x = sx; textArea.y = sy; textArea.w = 0; textArea.h = 0; selected=null; taSelected=false; draw(); return;
+  }
+
+  // select mode: prefer TA group selection
+  if(currentTool==='select' && textArea.active){
+    const insideTA = (sx>=textArea.x && sx<=textArea.x+textArea.w && sy>=textArea.y && sy<=textArea.y+textArea.h);
+    if(insideTA){
+      const hs = HANDLE, pad = 6; const corners = [
+        {x:textArea.x, y:textArea.y, k:'nw'},
+        {x:textArea.x+textArea.w, y:textArea.y, k:'ne'},
+        {x:textArea.x+textArea.w, y:textArea.y+textArea.h, k:'se'},
+        {x:textArea.x, y:textArea.y+textArea.h, k:'sw'},
+      ];
+      let nearHandle=null; for(const c of corners){ if(Math.abs(sx-c.x)<=hs/2+pad && Math.abs(sy-c.y)<=hs/2+pad){ nearHandle=c.k; break; } }
+      taSelected = true; draw();
+      if(nearHandle){
+        taResizing = true; taResizeCorner = nearHandle;
+        dragOffset = {sx, sy, itx:textArea.x, ity:textArea.y, w:textArea.w, h:textArea.h};
+      }else{
+        taDragging = true; taDragOffset = {x:sx - textArea.x, y:sy - textArea.y};
+      }
+      return;
+    } else {
+      taSelected = false;
+    }
+  }
+
+  // normal item selection
+  let hitIndex = -1, hitInfo = null;
+  for(let i=items.length-1;i>=0;i--){
+    const info = hitTest(items[i], sx, sy);
+    if(info){ hitIndex = i; hitInfo = info; break; }
+  }
+  if(hitIndex!==-1){
+    selected = hitIndex; draw();
+    const it = items[selected];
+    if(hitInfo.zone==='handle'){
+      resizing = true; resizeCorner = hitInfo.corner;
+      dragOffset = {sx, sy, itx:it.x, ity:it.y, w:it.w, h:it.h};
+    } else {
+      dragging = true; dragOffset = {x:sx - it.x, y:sy - it.y};
+      items.push(items.splice(selected,1)[0]);
+      selected = items.length-1;
+    }
+  } else {
+    selected = null; draw();
+  }
+});
+
+window.addEventListener('mousemove', (e)=>{
+  const {sx, sy} = getStageCoords(e);
+
+  // creating text area
+  if(taCreating && currentTool==='textarea'){
+    textArea.w = sx - textArea.x; textArea.h = sy - textArea.y;
+    if(textArea.w < 0){ textArea.x += textArea.w; textArea.w = -textArea.w; }
+    if(textArea.h < 0){ textArea.y += textArea.h; textArea.h = -textArea.h; }
+    draw(); return;
+  }
+
+  // dragging TA
+  if(taDragging){
+    const newX = sx - taDragOffset.x; const newY = sy - taDragOffset.y;
+    const dx = newX - textArea.x; const dy = newY - textArea.y;
+    textArea.x = newX; textArea.y = newY;
+    textArea.buffer.forEach(it=>{ it.x += dx; it.y += dy; });
+    draw(); return;
+  }
+  // resizing TA (scale whole group)
+  if(taResizing){
+    const dx = sx - dragOffset.sx; const dy = sy - dragOffset.sy;
+    const nw = dragOffset.w, nh = dragOffset.h;
+    const signX = (taResizeCorner==='ne' || taResizeCorner==='se') ? 1 : -1;
+    const signY = (taResizeCorner==='sw' || taResizeCorner==='se') ? 1 : -1;
+    const delta = Math.max(dx*signX, dy*signY);
+    const k = Math.max(0.2, (nw+delta)/nw);
+    const newW = nw*k, newH = nh*k;
+    const ax = dragOffset.itx + (taResizeCorner.includes('w') ? nw : 0);
+    const ay = dragOffset.ity + (taResizeCorner.includes('n') ? nh : 0);
+    const oldX = textArea.x, oldY = textArea.y;
+    textArea.w = newW; textArea.h = newH;
+    textArea.x = ax - (taResizeCorner.includes('w') ? newW : 0);
+    textArea.y = ay - (taResizeCorner.includes('n') ? newH : 0);
+    const scaleX = newW/nw, scaleY = newH/nh;
+    const ox = oldX, oy = oldY;
+    textArea.buffer.forEach(it=>{
+      const relX = it.x - ox, relY = it.y - oy;
+      it.x = textArea.x + relX * scaleX;
+      it.y = textArea.y + relY * scaleY;
+      it.w *= scaleX; it.h *= scaleY;
+    });
+    draw(); return;
+  }
+
+  // dragging/resizing single item
+  if(dragging && selected!=null){
+    const it = items[selected];
+    it.x = sx - dragOffset.x; it.y = sy - dragOffset.y; draw(); return;
+  }
+  if(resizing && selected!=null){
+    const it = items[selected];
+    const dx = sx - dragOffset.sx; const dy = sy - dragOffset.sy;
+    const nw = dragOffset.w, nh = dragOffset.h;
+    const keepAspect = true;
+    const signX = (resizeCorner==='ne' || resizeCorner==='se') ? 1 : -1;
+    const signY = (resizeCorner==='sw' || resizeCorner==='se') ? 1 : -1;
+    const delta = Math.max(dx*signX, dy*signY);
+    const k = Math.max(0.1, (nw+delta)/nw);
+    const newW = nw*k; const newH = keepAspect ? nh*k : nh + dy*signY;
+    const ax = dragOffset.itx + (resizeCorner.includes('w') ? nw : 0);
+    const ay = dragOffset.ity + (resizeCorner.includes('n') ? nh : 0);
+    it.w = newW; it.h = newH;
+    it.x = ax - (resizeCorner.includes('w') ? newW : 0);
+    it.y = ay - (resizeCorner.includes('n') ? newH : 0);
+    draw(); return;
+  }
+
+  // cursor feedback
+  let cursor = (currentTool==='text') ? 'text' : (currentTool==='textarea' ? 'crosshair' : 'default');
+  if(currentTool==='select'){
+    const insideTA = textArea.active && (sx>=textArea.x && sx<=textArea.x+textArea.w && sy>=textArea.y && sy<=textArea.y+textArea.h);
+    if(insideTA){ stage.style.cursor = 'move'; return; }
+    for(let i=items.length-1;i>=0;i--){
+      const info = hitTest(items[i], sx, sy);
+      if(info){ cursor = info.cursor; break; }
+    }
+  }
+  stage.style.cursor = cursor;
+});
+
+window.addEventListener('mouseup', ()=>{
+  if(taCreating && currentTool==='textarea'){
+    taCreating = false; textArea.active = (textArea.w>5 && textArea.h>5);
+    if(textArea.active){ textArea.cursorX = textArea.x; textArea.cursorY = textArea.y + LINE_HEIGHT; }
+    draw(); return;
+  }
+  taDragging=false; taResizing=false; taResizeCorner=null; dragging=false; resizing=false; resizeCorner=null;
+  stage.style.cursor = currentTool==='text' ? 'text' : (currentTool==='textarea' ? 'crosshair' : 'default');
+});
+stage.addEventListener('mouseleave', ()=>{ taDragging=false; taResizing=false; dragging=false; resizing=false; });
+
+// ----- Keyboard (add Shift+R rotation)
+window.addEventListener('keydown', (e)=>{
+  if(e.key==='t' || e.key==='T'){ setTool('text'); }
+  if(e.key==='v' || e.key==='V'){ setTool('select'); }
+  if(e.key==='y' || e.key==='Y'){ setTool('textarea'); }
+  if(e.key==='h' || e.key==='H'){ textArea.show = !textArea.show; draw(); }
+  if(e.key==='a' && (e.ctrlKey||e.metaKey)) return;
+
+  // Delete selected item OR entire text area
+  if (currentTool==='select' && (e.key==='Delete' || e.key==='Backspace')) {
+    if (taSelected && textArea.active) {
+      // remove all symbols belonging to this text area
+      textArea.buffer.forEach(it => {
+        const idx = items.indexOf(it);
+        if (idx > -1) items.splice(idx, 1);
+      });
+      // reset text area state
+      textArea.active = false;
+      textArea.buffer = [];
+      taSelected = false;
+      draw();
+    } else if (selected != null) {
+      items.splice(selected, 1);
+      selected = null;
+      draw();
+    }
+  }
+
+
+  // Rotate selected by 90°
+  if(currentTool==='select' && (e.key==='r' || e.key==='R') && e.shiftKey){
+    rotateSelected90();
+    e.preventDefault();
+  }
+
+  // caret typing
+  if(currentTool==='text' && caretActive){
+    if(e.key.length===1){
+      const ch = e.key.toLowerCase();
+      const imgTmpl = symbolMap[ch];
+      if(imgTmpl){
+        const img = new Image(); img.src = imgTmpl.src;
+        img.onload = ()=>{
+          const w = SYMBOL_SIZE;
+          const ratio = img.width ? (SYMBOL_SIZE / img.width) : 1;
+          const h = img.height ? img.height * ratio : SYMBOL_SIZE;
+          items.push({img, x: caretX, y: caretY - h + (LINE_HEIGHT/2), w, h, angle:0});
+          caretX += w + LETTER_SPACING;
+          selected = items.length-1; draw();
+        };
+      } else {
+        caretX += SYMBOL_SIZE + LETTER_SPACING; draw();
+      }
+      e.preventDefault();
+    } else if(e.key===' '){
+      caretX += SYMBOL_SIZE + LETTER_SPACING; e.preventDefault(); draw();
+    } else if(e.key==='Enter'){
+      caretX = caretStartX; caretY += LINE_HEIGHT; e.preventDefault(); draw();
+    } else if(e.key==='Backspace'){
+      if(items.length>0){
+        const last = items.pop();
+        // move caret back to where that symbol started
+        caretX = last.x;
+        caretY = last.y + last.h - (LINE_HEIGHT/2);
+        draw();
+      }
+      e.preventDefault();
+    }
+  }
+
+  // text-area typing
+  if(currentTool==='textarea' && textArea.active){
+    if(e.key.length===1){
+      const ch = e.key.toLowerCase();
+      const src = symbolMap[ch];
+      if(src){
+        const img = new Image(); img.src = src.src;
+        img.onload = ()=>{
+          const w = SYMBOL_SIZE;
+          const ratio = img.width ? (SYMBOL_SIZE / img.width) : 1;
+          const h = img.height ? img.height * ratio : SYMBOL_SIZE;
+          if(textArea.cursorX + w > textArea.x + textArea.w){ textArea.cursorX = textArea.x; textArea.cursorY += LINE_HEIGHT; }
+          if(textArea.cursorY > textArea.y + textArea.h){ return; }
+          const it = {img, x:textArea.cursorX, y:textArea.cursorY - h, w, h, angle:0};
+          items.push(it); textArea.buffer.push(it);
+          textArea.cursorX += w + LETTER_SPACING;
+          selected = items.length-1; draw();
+        };
+      } else {
+        if(textArea.cursorX + SYMBOL_SIZE > textArea.x + textArea.w){ textArea.cursorX = textArea.x; textArea.cursorY += LINE_HEIGHT; }
+        textArea.cursorX += SYMBOL_SIZE + LETTER_SPACING; draw();
+      }
+      e.preventDefault();
+    } else if(e.key===' '){
+      if(textArea.cursorX + SYMBOL_SIZE > textArea.x + textArea.w){ textArea.cursorX = textArea.x; textArea.cursorY += LINE_HEIGHT; }
+      textArea.cursorX += SYMBOL_SIZE + LETTER_SPACING; e.preventDefault(); draw();
+    } else if(e.key==='Enter'){
+      textArea.cursorX = textArea.x; textArea.cursorY += LINE_HEIGHT; e.preventDefault(); draw();
+    } else if(e.key==='Backspace'){
+  const last = textArea.buffer.pop();
+  if (last) {
+    const idx = items.indexOf(last);
+    if (idx > -1) items.splice(idx, 1);
+    // Restore caret to the deleted symbol's start position
+    textArea.cursorX = last.x;
+    textArea.cursorY = last.y + last.h; // back to baseline
+  } else {
+    // Nothing left in this text area
+    textArea.cursorX = textArea.x;
+    textArea.cursorY = textArea.y + LINE_HEIGHT;
+  }
+  draw();
+  e.preventDefault();
+}
+  }
+});
+
+// Rotate helper: keep center fixed, swap w/h to match rotated bounds
+function rotateSelected90(){
+  if(selected==null) return;
+  const it = items[selected];
+  if(!it) return;
+  const cx = it.x + it.w/2; const cy = it.y + it.h/2;
+  const newW = it.h; const newH = it.w; // swap
+  it.x = cx - newW/2; it.y = cy - newH/2; // keep center
+  it.w = newW; it.h = newH;
+  it.angle = ((it.angle || 0) + 90) % 360;
+  draw();
+}
+
+function moveTextAreaGroup(delta){
+  if (!textArea.active || !textArea.buffer.length) return;
+
+  // Keep group order as it currently appears in items
+  const groupSet = new Set(textArea.buffer);
+  const group = items.filter(it => groupSet.has(it));
+  const others = items.filter(it => !groupSet.has(it));
+
+  // Where is the group anchored among the non-group items?
+  // Position = how many "others" are before the first group element.
+  const firstGroupIndex = items.findIndex(it => groupSet.has(it));
+  const posAmongOthers = items.slice(0, firstGroupIndex).filter(it => !groupSet.has(it)).length;
+
+  // New position (clamped) among the 'others' list
+  const target = Math.max(0, Math.min(others.length, posAmongOthers + delta));
+
+  // Rebuild stacking: others before target, then entire group, then remaining others
+  items = [...others.slice(0, target), ...group, ...others.slice(target)];
+
+  // No single item selected when moving a group
+  selected = null;
+  draw();
+}
+
+
+// ===== Draggable gutters (resize side columns)
+(function(){
+  const app = document.querySelector('.app');
+  let active = null;
+  const getNum = v => (parseInt(v,10)||0);
+  function getLeft(){ const v = getComputedStyle(app).getPropertyValue('--left'); return getNum(v)||260; }
+  function getRight(){ const v = getComputedStyle(app).getPropertyValue('--right'); return getNum(v)||260; }
+  function setLeft(px){ app.style.setProperty('--left', Math.max(140, px)+'px'); resizeCanvasToFit(); }
+  function setRight(px){ app.style.setProperty('--right', Math.max(140, px)+'px'); resizeCanvasToFit(); }
+  function start(which, x){ active={which,startX:x,left:getLeft(),right:getRight()}; document.body.style.cursor='col-resize'; }
+  function move(x){ if(!active) return; const dx = x - active.startX; if(active.which==='left'){ setLeft(active.left + dx); } else { setRight(active.right - dx); } }
+  function end(){ active=null; document.body.style.cursor=''; }
+  document.getElementById('gutter-left').addEventListener('mousedown', e=> start('left', e.clientX));
+  document.getElementById('gutter-right').addEventListener('mousedown', e=> start('right', e.clientX));
+  window.addEventListener('mousemove', e=> move(e.clientX));
+  window.addEventListener('mouseup', end);
+})();
+
+// Init
+resizeCanvasToFit();
+draw();
+</script>
+</body>
+</html>
